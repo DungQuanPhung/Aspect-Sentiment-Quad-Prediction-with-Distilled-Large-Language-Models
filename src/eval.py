@@ -1,60 +1,75 @@
 import json
-import ast
 import os
+import re
+import argparse
 import warnings
 from collections import defaultdict
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src import *
 
-import warnings
+# Scoring only needs the data folder; importing `src` would pull in every LLM SDK.
+data_path = os.path.join(os.getcwd(), "data")
 warnings.filterwarnings("ignore")
 
 
 def read_sentences(file_path):
-    with open(file_path, 'r') as file:
+    with open(file_path, 'r', encoding='utf-8') as file:
         data = json.load(file)
     return data
 
 
 def read_agents_out(file_path):
-    with open(file_path, 'r') as file:
+    with open(file_path, 'r', encoding='utf-8') as file:
         data = json.load(file)
     return data
 
 
 def read_multiple_json(inference_filename):
-    prefix = inference_filename
-    files = os.listdir(os.path.join(data_path, "processed"))
-    json_files = [file for file in files if file.startswith(prefix) and file.endswith('.json')]
-
-    # json_data_list = []
-    count_instances = 0
+    """Concatenates `<prefix>_1.json`, `<prefix>_2.json`, ... written by resumed runs."""
+    processed_dir = os.path.join(data_path, "processed")
+    pattern = re.compile(rf"^{re.escape(inference_filename)}_(\d+)\.json$")
+    matches = sorted((int(m.group(1)), f) for f in os.listdir(processed_dir) if (m := pattern.match(f)))
+    if not matches:
+        raise FileNotFoundError(f"No prediction files '{inference_filename}_<n>.json' in {processed_dir}")
     data = defaultdict(list)
-    for file_id, _ in enumerate(range(len(json_files)), start=1):
-        file_path = os.path.join(os.path.join(data_path, "processed"),
-                                 inference_filename + "_" + str(file_id) + ".json")
-        with open(file_path, 'r') as f:
-            json_data = json.load(f)
-            # print(len(json_data['Aspects_Sentiments_Categories']))
-            for k, v in json_data.items():
+    for _, json_file in matches:
+        with open(os.path.join(processed_dir, json_file), 'r', encoding='utf-8') as f:
+            for k, v in json.load(f).items():
                 data[k].extend(v)
-            # json_data_list.append(json_data)
-    # keys = ['Aspects_Sentiments_Categories', 'Aspects_Categories_Sentiments', 'Sentiments_Aspects_Categories',
-    #         'Sentiments_Categories_Aspects', 'Categories_Aspects_Sentiments', 'Categories_Sentiments_Aspects']
-    # fd = dict()
-    # for k in keys:
-    #     fd[k] = data[k]
     return data
 
 
-def calculate_tp_fp_fn_asqp(gold_quadruples, pred_quadruples):
-    gold_set = set(tuple(q) for q in gold_quadruples)
+def read_timing(inference_filename):
+    """Sums the `_timing.json` files of all (possibly resumed) runs for this prefix."""
+    timing_dir = os.path.join(data_path, "processed", "timing")
+    if not os.path.isdir(timing_dir):
+        return None
+    pattern = re.compile(rf"^{re.escape(inference_filename)}_(\d+)_timing\.json$")
+    total = {"n_instances": 0, "total_sec": 0.0, "n_api_calls": 0}
+    found = False
+    for f in os.listdir(timing_dir):
+        if pattern.match(f):
+            found = True
+            with open(os.path.join(timing_dir, f), 'r', encoding='utf-8') as fh:
+                run = json.load(fh)
+            for key in total:
+                total[key] += run.get(key, 0)
+    if not found:
+        return None
+    total["sec_per_instance"] = total["total_sec"] / total["n_instances"] if total["n_instances"] else 0
+    return total
+
+
+def normalize_quads(quadruples):
+    """Case/whitespace-insensitive set of quads, so 'Phòng' and 'phòng' count as the same term."""
     try:
-        pred_set = set(tuple(q) for q in pred_quadruples)
+        return set(tuple(str(e).strip().lower() for e in q) for q in quadruples)
     except TypeError:
         warnings.warn("Parsing Error")
-        pred_set = set()
+        return set()
+
+
+def calculate_tp_fp_fn_asqp(gold_quadruples, pred_quadruples):
+    gold_set = normalize_quads(gold_quadruples)
+    pred_set = normalize_quads(pred_quadruples)
     tp = len(gold_set & pred_set)
     fp = len(pred_set - gold_set)
     fn = len(gold_set - pred_set)
@@ -62,16 +77,8 @@ def calculate_tp_fp_fn_asqp(gold_quadruples, pred_quadruples):
 
 
 def calculate_tp_fp_fn_aste(gold_quadruples, pred_quadruples):
-    gold_set = set(tuple(q) for q in gold_quadruples)
-    try:
-        pred_set = set(tuple(q) for q in pred_quadruples)
-    except TypeError:
-        warnings.warn("Parsing Error")
-        pred_set = set()
-    gold_set = {(a, p, o) for a, c, p, o in gold_set}
-    if pred_set:
-        pred_set = {pred_ for pred_ in pred_set if len(pred_) == 4}
-        pred_set = {(a, p, o) for a, c, p, o in pred_set}
+    gold_set = {(a, p, o) for a, c, p, o in normalize_quads(gold_quadruples)}
+    pred_set = {(q[0], q[2], q[3]) for q in normalize_quads(pred_quadruples) if len(q) == 4}
     tp = len(gold_set & pred_set)
     fp = len(pred_set - gold_set)
     fn = len(gold_set - pred_set)
@@ -79,16 +86,8 @@ def calculate_tp_fp_fn_aste(gold_quadruples, pred_quadruples):
 
 
 def calculate_tp_fp_fn_acsa(gold_quadruples, pred_quadruples):
-    gold_set = set(tuple(q) for q in gold_quadruples)
-    try:
-        pred_set = set(tuple(q) for q in pred_quadruples)
-    except TypeError:
-        warnings.warn("Parsing Error")
-        pred_set = set()
-    gold_set = {(c, p) for a, c, p, o in gold_set}
-    if pred_set:
-        pred_set = {pred_ for pred_ in pred_set if len(pred_) == 4}
-        pred_set = {(c, p) for a, c, p, o in pred_set}
+    gold_set = {(c, p) for a, c, p, o in normalize_quads(gold_quadruples)}
+    pred_set = {(q[1], q[2]) for q in normalize_quads(pred_quadruples) if len(q) == 4}
     tp = len(gold_set & pred_set)
     fp = len(pred_set - gold_set)
     fn = len(gold_set - pred_set)
@@ -206,7 +205,8 @@ def main(gold_file, pred_file=None, pred_prefix=None):
 
         overall_precision, overall_recall, overall_fscore = calculate_fscore(total_tp_asqp, total_fp_asqp,
                                                                              total_fn_asqp)
-        scoring[k] = {"ASQP_precision": overall_precision, "ASQP_recall": overall_recall, "ASQP_fscore": overall_fscore}
+        scoring[k] = {"ASQP_precision": overall_precision, "ASQP_recall": overall_recall, "ASQP_fscore": overall_fscore,
+                      "gibberish_outputs": gibrish_count}
 
         overall_precision, overall_recall, overall_fscore = calculate_fscore(total_tp_aste, total_fp_aste,
                                                                              total_fn_aste)
@@ -221,21 +221,24 @@ def main(gold_file, pred_file=None, pred_prefix=None):
     sorted_data = dict(sorted(scoring.items(), key=lambda item: item[1]['ASQP_fscore']))
     for k, v in sorted_data.items():
         print(k)
-        print("Overall Scores for ASQP:")
-        # print(f"  Precision: {v['ASQP_precision']:.4f}")
-        # print(f"  Recall: {v['ASQP_recall']:.4f}")
+        print("Overall Scores for ASQP (quad-F1):")
+        print(f"  Precision: {v['ASQP_precision']:.4f}")
+        print(f"  Recall: {v['ASQP_recall']:.4f}")
         print(f"  F-score: {v['ASQP_fscore']:.4f}")
-        # print("Overall Scores for ASTE:")
-        # print(f"  Precision: {v['ASTE_precision']:.4f}")
-        # print(f"  Recall: {v['ASTE_recall']:.4f}")
-        # print(f"  F-score: {v['ASTE_fscore']:.4f}")
-        # print("Overall Scores for ACSA:")
-        # print(f"  Precision: {v['ACSA_precision']:.4f}")
-        # print(f"  Recall: {v['ACSA_recall']:.4f}")
-        # print(f"  F-score: {v['ACSA_fscore']:.4f}")
-
-        # print("Amount of gibrish generations: ", gibrish_count)
-        print("\n")
+        print(f"  Unparsable outputs: {v['gibberish_outputs']}")
+        print()
+    timing = read_timing(pred_prefix) if pred_prefix else None
+    if timing:
+        print(f"Inference time: {timing['total_sec']:.1f}s for {timing['n_instances']} instances "
+              f"({timing['sec_per_instance']:.2f}s/instance, {timing['n_api_calls']} API calls)\n")
+    results = {"gold_file": gold_file, "predictions": pred_prefix or pred_file,
+               "n_evaluated": len(gold_sentences), "timing": timing, "scores": sorted_data}
+    scores_dir = os.path.join(data_path, "processed", "scores")
+    os.makedirs(scores_dir, exist_ok=True)
+    scores_name = pred_prefix or os.path.splitext(os.path.basename(pred_file))[0]
+    with open(os.path.join(scores_dir, scores_name + "_scores.json"), 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=4, ensure_ascii=False)
+    return results
     # if "agents" in (pred_prefix or pred_file):
     #     print("Agent Aggregate")
     #     aggregate = list()
@@ -286,60 +289,18 @@ def main(gold_file, pred_file=None, pred_prefix=None):
 
 # Example usage
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Quad-F1 (ASQP), ASTE and ACSA scores for saved predictions.")
+    parser.add_argument("--dataset", default="hotels_vn", help="use e.g. hotels_vn_dev to score a --split dev run")
+    parser.add_argument("--model", default="gemini-2.0-flash-001")
+    parser.add_argument("--tasks", nargs="+",
+                        default=["agents", "icl_0", "icl_2", "icl_10", "icl_20", "icl_50", "icl_100"])
+    args = parser.parse_args()
 
-    print("_____Model: GPT_____\n")
-
-    datasets  = ["shoes", "rest15", "rest16", 'hotels', 'amazon_ff', "laptop_acos", "shoes"]
-    # tasks =  ["icl_0", "icl_2", "icl_10", "icl_20",  "icl_50", "icl_100"] 
-    # # tasks = ['agents']
-
-    experiments_todo = list()
-    # for dataset in datasets:
-    #     print("___ Dataset: ", dataset, "___")
-    #     for task in tasks:
-    #         try:
-    #             model = "gpt-4o"
-    #             pred_prefix = model + "_" + task + "_" + dataset
-    #             gold_file = os.path.join(data_path, "processed", dataset + "_ground_truth.json")
-    #             main(gold_file, pred_prefix=pred_prefix, pred_file=None)
-    #         except IndexError:
-    #             try:
-    #                 model = "gpt-4o-2024-08-06"
-    #                 pred_prefix = model + "_" + task + "_" + dataset
-    #                 gold_file = os.path.join(data_path, "processed", dataset + "_ground_truth.json")
-    #                 main(gold_file, pred_prefix=pred_prefix, pred_file=None)
-    #             except:
-    #                 experiments_todo.append((task, dataset))
-            
-    #     print()
-
-    # print(experiments_todo)
-
-
-    tasks = ["icl_20"]
-    for dataset in datasets:
-        print("___ Dataset: ", dataset, "___")
-        for task in tasks:
-            print("Chat-Based")
-            try:
-                model = "gpt-4o"
-                pred_prefix = model + "_" + task + "_" + dataset
-                gold_file = os.path.join(data_path, "processed", dataset + "_ground_truth.json")
-                main(gold_file, pred_prefix=pred_prefix, pred_file=None)
-            except IndexError:
-                try:
-                    model = "gpt-4o-2024-08-06"
-                    pred_prefix = model + "_" + task + "_" + dataset
-                    gold_file = os.path.join(data_path, "processed", dataset + "_ground_truth.json")
-                    main(gold_file, pred_prefix=pred_prefix, pred_file=None)
-                except:
-                    experiments_todo.append((task, dataset))
-            
-            print("Single Prompt")
-            model = "gpt-4o-2024-08-06"
-            pred_prefix = "ASQP_" + model + "_" + task + "_" + dataset
-            gold_file = os.path.join(data_path, "processed", dataset + "_ground_truth.json")
-            main(gold_file, pred_prefix=pred_prefix, pred_file=None)
-
-        print()
-    print(experiments_todo)
+    gold_file = os.path.join(data_path, "processed", args.dataset + "_ground_truth.json")
+    for task in args.tasks:
+        pred_prefix = f"{re.sub(r'[/:]', '_', args.model)}_{task}_{args.dataset}"
+        print(f"___ {pred_prefix} ___")
+        try:
+            main(gold_file, pred_prefix=pred_prefix)
+        except FileNotFoundError as e:
+            print(e, "\n")

@@ -38,7 +38,7 @@ def fill_examples(dataset_name):
     global examples
     data_path = os.path.join(os.getcwd(), "data", "raw")
     input_file = os.path.join(data_path, dataset_name, 'train.txt')
-    with open(input_file, 'r') as file:
+    with open(input_file, 'r', encoding='utf-8') as file:
         text = file.read()
     extract_examples(text)
 

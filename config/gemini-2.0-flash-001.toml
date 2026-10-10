@@ -1,6 +1,7 @@
 [parameters]
 temperature = 0.0
-max_output_tokens = 128
+# archive segments carry up to 23 quads, so leave room for long outputs
+max_output_tokens = 1024
 #topK = 50
 #topP = 0.9
 #candidate_count = 1

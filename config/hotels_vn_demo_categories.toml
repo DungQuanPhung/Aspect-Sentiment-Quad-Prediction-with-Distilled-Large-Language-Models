@@ -1,0 +1,8 @@
+categories = [
+    "AMENITY",
+    "BRANDING",
+    "EXPERIENCE",
+    "FACILITY",
+    "LOYALTY",
+    "SERVICE",
+]
