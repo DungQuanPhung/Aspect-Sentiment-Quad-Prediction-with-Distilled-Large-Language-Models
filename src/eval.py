@@ -43,7 +43,7 @@ def read_timing(inference_filename):
     if not os.path.isdir(timing_dir):
         return None
     pattern = re.compile(rf"^{re.escape(inference_filename)}_(\d+)_timing\.json$")
-    total = {"n_instances": 0, "total_sec": 0.0, "n_api_calls": 0}
+    total = {"n_instances": 0, "total_sec": 0.0, "n_api_calls": 0, "train_sec": 0.0}
     found = False
     for f in os.listdir(timing_dir):
         if pattern.match(f):
@@ -51,7 +51,7 @@ def read_timing(inference_filename):
             with open(os.path.join(timing_dir, f), 'r', encoding='utf-8') as fh:
                 run = json.load(fh)
             for key in total:
-                total[key] += run.get(key, 0)
+                total[key] += run.get(key) or 0
     if not found:
         return None
     total["sec_per_instance"] = total["total_sec"] / total["n_instances"] if total["n_instances"] else 0
@@ -231,6 +231,8 @@ def main(gold_file, pred_file=None, pred_prefix=None):
     if timing:
         print(f"Inference time: {timing['total_sec']:.1f}s for {timing['n_instances']} instances "
               f"({timing['sec_per_instance']:.2f}s/instance, {timing['n_api_calls']} API calls)\n")
+        if timing["train_sec"]:
+            print(f"Training time: {timing['train_sec']:.0f}s ({timing['train_sec'] / 3600:.2f} h)\n")
     results = {"gold_file": gold_file, "predictions": pred_prefix or pred_file,
                "n_evaluated": len(gold_sentences), "timing": timing, "scores": sorted_data}
     scores_dir = os.path.join(data_path, "processed", "scores")
